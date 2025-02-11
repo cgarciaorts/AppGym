@@ -58,16 +58,75 @@ def obtener_lista_sesiones():
 def obtener_lista_ejercicios():
     return pd.read_sql("SELECT DISTINCT categoria, subcategoria, ejercicio FROM ejercicios ORDER BY categoria, subcategoria, ejercicio", conn_ejercicios)
 
+# def obtener_bloques_y_ejercicios(sesion_id):
+#     bloques_df = pd.read_sql(f"SELECT * FROM bloques WHERE sesion_id = {sesion_id}", conn_ejercicios)
+#     bloques = []
+#     for _, bloque in bloques_df.iterrows():
+#         ejercicios_df = pd.read_sql(f"SELECT * FROM ejercicios WHERE bloque_id = {bloque['id']}", conn_ejercicios)
+#         bloques.append({"nombre": bloque["tipo"], "ejercicios": ejercicios_df.to_dict(orient="records")})
+#     return bloques
 def obtener_bloques_y_ejercicios(sesion_id):
-    bloques_df = pd.read_sql(f"SELECT * FROM bloques WHERE sesion_id = {sesion_id}", conn_ejercicios)
+    bloques_df = pd.read_sql("SELECT id, tipo FROM bloques WHERE sesion_id = ?", conn_ejercicios, params=(sesion_id,))
+    
+    if 'id' not in bloques_df.columns:
+        st.error("Error: No se encontró la columna 'id' en la consulta de bloques.")
+        return []
+    
     bloques = []
     for _, bloque in bloques_df.iterrows():
-        ejercicios_df = pd.read_sql(f"SELECT * FROM ejercicios WHERE bloque_id = {bloque['id']}", conn_ejercicios)
-        bloques.append({"nombre": bloque["tipo"], "ejercicios": ejercicios_df.to_dict(orient="records")})
+        ejercicios_df = pd.read_sql("SELECT id, ejercicio, categoria, subcategoria FROM ejercicios WHERE bloque_id = ?", conn_ejercicios, params=(bloque['id'],))
+        bloques.append({
+            "id": bloque["id"], 
+            "nombre": bloque["tipo"], 
+            "ejercicios": ejercicios_df.to_dict(orient="records")
+        })
     return bloques
 
+# def eliminar_sesion(sesion_id):
+#     cursor_sesiones.execute("DELETE FROM sesiones WHERE id = ?", (sesion_id,))
+#     cursor_ejercicios.execute("DELETE FROM bloques WHERE sesion_id = ?", (sesion_id,))
+#     cursor_ejercicios.execute("DELETE FROM ejercicios WHERE bloque_id IN (SELECT id FROM bloques WHERE sesion_id = ?)", (sesion_id,))
+#     conn_sesiones.commit()
+#     conn_ejercicios.commit()
+#     st.rerun()
+def eliminar_sesion(sesion_id):
+    # Primero, eliminar ejercicios de los bloques asociados a la sesión
+    cursor_ejercicios.execute("DELETE FROM ejercicios WHERE bloque_id IN (SELECT id FROM bloques WHERE sesion_id = ?)", (sesion_id,))
+    conn_ejercicios.commit()
+
+    # Luego, eliminar los bloques de la sesión
+    cursor_ejercicios.execute("DELETE FROM bloques WHERE sesion_id = ?", (sesion_id,))
+    conn_ejercicios.commit()
+
+    # Finalmente, eliminar la sesión
+    cursor_sesiones.execute("DELETE FROM sesiones WHERE id = ?", (sesion_id,))
+    conn_sesiones.commit()
+
+    # Volver a la pantalla principal
+    st.session_state.sesion_seleccionada = None
+    st.rerun()
+
+def eliminar_bloque(bloque_id):
+    cursor_ejercicios.execute("DELETE FROM bloques WHERE id = ?", (bloque_id,))
+    cursor_ejercicios.execute("DELETE FROM ejercicios WHERE bloque_id = ?", (bloque_id,))
+    conn_ejercicios.commit()
+    st.rerun()
+
+def eliminar_ejercicio(ejercicio_id):
+    cursor_ejercicios.execute("DELETE FROM ejercicios WHERE id = ?", (ejercicio_id,))
+    conn_ejercicios.commit()
+    st.rerun()
+
 def mostrar_sesion_completa(sesion_id):
-    sesion = pd.read_sql(f"SELECT * FROM sesiones WHERE id = {sesion_id}", conn_sesiones).iloc[0]
+    sesion_df = pd.read_sql("SELECT * FROM sesiones WHERE id = ?", conn_sesiones, params=(sesion_id,))
+
+    # Verificar si hay resultados
+    if sesion_df.empty:
+        st.error(f"⚠️ No se encontró ninguna sesión con ID {sesion_id}")
+        return  # Salir de la función si no hay sesión encontrada
+
+    sesion = sesion_df.iloc[0]  # Ahora sabemos que hay al menos una fila
+
     bloques = obtener_bloques_y_ejercicios(sesion_id)
     
     st.header(f"📅 {sesion['fecha']} - {sesion['tipo']}")
@@ -76,7 +135,12 @@ def mostrar_sesion_completa(sesion_id):
         with st.expander(f"🟢 {bloque['nombre']}", expanded=True):
             for ejercicio in bloque["ejercicios"]:
                 st.write(f"✅ {ejercicio['ejercicio']} ({ejercicio['categoria']} - {ejercicio['subcategoria']})")
+                st.write(f"**Series:** {ejercicio['series']} | **Repeticiones:** {ejercicio['repeticiones']}")
     
+    if st.button("🗑️ Eliminar Sesión"):
+        eliminar_sesion(sesion_id)
+        st.rerun()    
+        
     if st.button("⬅️ Volver a la lista de sesiones"):
         st.session_state.sesion_seleccionada = None
         st.rerun()
@@ -100,8 +164,8 @@ def agregar_sesion_temporal():
             
             for ejercicio in bloque["ejercicios"]:
                 cursor_ejercicios.execute(
-                    "INSERT INTO ejercicios (bloque_id, ejercicio, categoria, subcategoria) VALUES (?, ?, ?, ?)",
-                    (bloque_id, ejercicio["nombre"], ejercicio["categoria"], ejercicio["subcategoria"])
+                    "INSERT INTO ejercicios (bloque_id, ejercicio, categoria, subcategoria, series, repeticiones) VALUES (?, ?, ?, ?, ?, ?)",
+                    (bloque_id, ejercicio["nombre"], ejercicio["categoria"], ejercicio["subcategoria"], ejercicio["series"], ejercicio["repeticiones"])
                 )
         conn_ejercicios.commit()
         st.session_state.sesion_temp = {"nombre": "", "fecha": None, "bloques": []}
@@ -150,6 +214,7 @@ if not st.session_state.creando_sesion and not st.session_state.sesion_seleccion
 if st.session_state.sesion_seleccionada:
     mostrar_sesion_completa(st.session_state.sesion_seleccionada)
 
+# Crear sesiones
 if st.session_state.creando_sesion:
     st.header("📅 Crear Nueva Sesión")
     if st.button("⬅️ Volver atrás"):
@@ -170,7 +235,8 @@ if st.session_state.creando_sesion:
             st.write("### Ejercicios en este bloque:")
             for ejercicio in bloque["ejercicios"]:
                 st.write(f"✅ {ejercicio['nombre']} ({ejercicio['categoria']} - {ejercicio['subcategoria']})")
-            
+                st.write(f"**Series:** {ejercicio['series']} | **Repeticiones:** {ejercicio['repeticiones']}")
+
             lista_ejercicios_df = obtener_lista_ejercicios()
             categoria_opciones = lista_ejercicios_df["categoria"].dropna().unique().tolist()
             categoria_seleccionada = st.selectbox("Categoría", categoria_opciones, key=f"categoria_{i}")
@@ -183,11 +249,16 @@ if st.session_state.creando_sesion:
             ejercicio_opciones = ejercicio_df["ejercicio"].dropna().unique().tolist()
             nombre_ejercicio = st.selectbox("Ejercicio", ejercicio_opciones, key=f"ejercicio_{i}")
             
+            series = st.number_input("Series", min_value=1, max_value=10, value=3, key=f"series_{i}")
+            repeticiones = st.number_input("Repeticiones", min_value=1, max_value=50, value=10, key=f"reps_{i}")
+            
             if st.button("Añadir Ejercicio", key=f"btn_ejercicio_{i}"):
                 st.session_state.sesion_temp["bloques"][i]["ejercicios"].append({
                     "nombre": nombre_ejercicio,
                     "categoria": categoria_seleccionada,
-                    "subcategoria": subcategoria_seleccionada
+                    "subcategoria": subcategoria_seleccionada,
+                    "series": series,
+                    "repeticiones": repeticiones
                 })
                 st.rerun()
                 
